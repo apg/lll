@@ -1,72 +1,19 @@
+#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 
-#define SYMTAB_INIT_SIZE 8
-#define OPSTACK_INIT_SIZE 1024
+#ifdef __LP64__
+typedef uint64_t sn_ptr_t;
+typedef int64_t sn_int_t;
+#define SN_INT_BITS 63
+#else
+typedef uint32_t sn_ptr_t;
+typedef int32_t sn_int_t;
+#define SN_INT_BITS 31
+#endif
 
-typedef struct atom atom_t;
-typedef struct cons cons_t;
-typedef struct prim prim_t;
-typedef struct obj obj_t;
-
-#define ISNIL(a) (a.car == NULL && a.cdr == NULL)
-#define MIN(x, y) (x > y ? y: x)
-
-typedef enum flag {
-  ATOM_T,
-  CONS_T,
-  CLOS_T,
-  PRIM_T
-} flag_t;
-
-typedef enum atom_flag {
-  NUM_T,
-  STRING_T,
-  SYMBOL_T
-} atom_flag_t;
-
-typedef enum opcode {
-  OP_DISPATCH,
-  OP_DONE,
-  OP_POPJ_RET,
-  OP_IF_DECIDE,
-  OP_APPLY_NO_ARGS,
-  OP_ARGS,
-  OP_ARGS_1,
-  OP_ARGS_2,
-  OP_LAST_ARG,
-  OP_APPLY
-} opcode_t;
-
-struct atom {
-  atom_flag_t flag;
-  union {
-    double num;
-    struct {
-      char *data;
-      size_t length;
-    } string;
-  };
-};
-
-struct cons {
-  obj_t *car;
-  obj_t *cdr;
-};
-
-struct prim {
-  obj_t * (*func)(obj_t *a);
-};
-
-struct obj {
-  flag_t flag;
-  union {
-    atom_t atom;
-    cons_t cons;
-    prim_t prim;
-  };
-};
+#include "lll.h"
 
 obj_t *NIL;
 obj_t *Env;
@@ -84,31 +31,22 @@ opcode_t *Opstack = NULL;
 size_t Opstack_alloc = 0;
 int Opstack_index = 0;
 
-obj_t *mk_num(double d);
-obj_t *mk_str(char *s, size_t len);
-obj_t *mk_sym(char *s, size_t len);
-obj_t *intern(char *s, size_t len);
-obj_t *cons(obj_t *a, obj_t *d);
-obj_t *car(obj_t *a);
-obj_t *cdr(obj_t *a);
-obj_t *eval(obj_t *a, obj_t *env);
-
-obj_t *read_object(FILE *in);
-void print_object(FILE *out, obj_t *o);
-
 
 static void print_atom(FILE *out, atom_t a);
 static void print_cons(FILE *out, cons_t a);
-
 
 static void
 print_atom(FILE *out, atom_t a)
 {
   int i;
   switch (a.flag) {
-  case NUM_T:
-    fprintf(out, "%lf", a.num);
+  case FIXNUM_T:
+    fprintf(out, "%ld", a.fixnum);
     break;
+  case FLONUM_T:
+    fprintf(out, "%lf", a.flonum);
+    break;
+  case KEYWORD_T:
   case SYMBOL_T:
     fprintf(out, "%s", a.string.data);
     break;
@@ -242,7 +180,8 @@ read_number(FILE *in, int negative)
   int bufi = 0;
   int sawdot = 0;
   int ch;
-  double value;
+  double floval;
+  long fixval;
 
   while (bufi < 32) {
     ch = fgetc(in);
@@ -269,11 +208,20 @@ read_number(FILE *in, int negative)
       /* have our number. Let's do it */
       buffer[bufi] = '\0';
       if (bufi > 0) {
-        value = strtod(buffer, NULL);
-        if (negative) {
-          value *= -1.0;
+        if (sawdot) {
+          floval = strtod(buffer, NULL);
+          if (negative) {
+            floval *= -1.0;
+          }
+          return mk_flonum(floval);
         }
-        return mk_num(value);
+        else {
+          fixval = strtol(buffer, NULL, 10);
+          if (negative) {
+            fixval *= -1L;
+          }
+          return mk_fixnum(fixval);
+        }
       }
       else {
         fprintf(stderr, "ERROR: Invalid number found\n");
@@ -302,10 +250,13 @@ read_symbol(FILE *in)
     if (isalnum(ch)) {
       buffer[bufi++] = ch;
     }
-    else if (isgraph(ch) && ch != ')' && ch != '(' && ch != '"' && !isspace(ch)) {
+    else if (ch == '.') { /* TODO: Need to turn this into a refer form ideally ... */
       buffer[bufi++] = ch;
     }
-    else if (ch == ')' || ch == '(' || ch == '"' || isspace(ch)) {
+    else if (isgraph(ch) && !isspace(ch) && ch != '(' && ch != ')' && ch != '"') {
+      buffer[bufi++] = ch;
+    }
+    else if (isspace(ch) || ch == '(' || ch == ')' || ch == '"') {
       ungetc(ch, in);
       buffer[bufi] = '\0';
       return intern(buffer, bufi);
@@ -315,6 +266,16 @@ read_symbol(FILE *in)
       return NULL;
     }
   }
+}
+
+static char
+eat_space(FILE *in)
+{
+  int ch;
+  do {
+    ch = fgetc(in);
+  } while (isspace(ch));
+  return ch;
 }
 
 static obj_t *
@@ -342,9 +303,9 @@ read_list(FILE *in)
     return obj;
   }
 
-  do {
-    ch = fgetc(in);
-  } while (isspace(ch));
+  print_object(stdout, obj);
+
+  ch = eat_space(in); printf("Ate space\n");
 
   if (ch == ')') {
     return cons(obj, NIL);
@@ -357,6 +318,7 @@ read_list(FILE *in)
 obj_t *
 read_object(FILE *in)
 {
+  obj_t *tmp;
   int ch, la;
  next:
   ch = fgetc(in);
@@ -367,6 +329,13 @@ read_object(FILE *in)
   switch (ch) {
   case '(':
     return read_list(in);
+  case ';': /* read til end of line */
+    while ((ch = fgetc(in)) != '\n') {
+      if (ch == EOF) {
+        return NULL;
+      }
+    }
+    goto next;
   case ' ':
   case '\t':
   case '\n':
@@ -374,6 +343,12 @@ read_object(FILE *in)
     goto next;
   case '"':
     return read_string(in);
+  case '\'':
+    tmp = read_object(in);
+    if (tmp != NULL) {
+      return cons(QUOTE, cons(tmp, NIL));
+    }
+    return tmp;
   case '-':
   case '+':
     la = fgetc(in);
@@ -394,12 +369,12 @@ read_object(FILE *in)
       return read_number(in, 0);
     }
   }
+  fprintf(stderr, "Reading a symbol.\n");
   return read_symbol(in);
 }
 
-
 obj_t *
-mk_num(double d)
+mk_fixnum(long d)
 {
   obj_t *o = malloc(sizeof(*o));
   if (o == NULL) {
@@ -408,8 +383,24 @@ mk_num(double d)
   }
 
   o->flag = ATOM_T;
-  o->atom.flag = NUM_T;
-  o->atom.num = d;
+  o->atom.flag = FIXNUM_T;
+  o->atom.fixnum = d;
+
+  return o;
+}
+
+obj_t *
+mk_flonum(double d)
+{
+  obj_t *o = malloc(sizeof(*o));
+  if (o == NULL) {
+    perror("malloc");
+    exit(1);
+  }
+
+  o->flag = ATOM_T;
+  o->atom.flag = FLONUM_T;
+  o->atom.flonum = d;
 
   return o;
 }
@@ -432,7 +423,7 @@ mk_str(char *str, size_t len)
 }
 
 obj_t *
-mk_sym(char *str, size_t len)
+mk_sym(char *str, size_t len, int keywordp)
 {
   obj_t *o = malloc(sizeof(*o));
   if (o == NULL) {
@@ -441,7 +432,7 @@ mk_sym(char *str, size_t len)
   }
 
   o->flag = ATOM_T;
-  o->atom.flag = SYMBOL_T;
+  o->atom.flag = keywordp ? KEYWORD_T : SYMBOL_T;
   o->atom.string.data = strndup(str, len);
   o->atom.string.length = len;
 
@@ -451,18 +442,27 @@ mk_sym(char *str, size_t len)
 obj_t *
 intern(char *str, size_t len)
 {
-  int i;
+  int i, keywordp = 0;
   obj_t *sym;
   if (Symtab_index > 0) {
     for (i = 0; i < Symtab_index; i++) {
-      if (strncmp(Symtab[i]->atom.string.data, str, MIN(len, Symtab[i]->atom.string.length)) == 0) {
+      if (len != Symtab[i]->atom.string.length) {
+        continue;
+      }
+      if (strncmp(Symtab[i]->atom.string.data, str, len) == 0) {
         return Symtab[i];
       }
     }
   }
   
-  /* Make the symbol */
-  sym = mk_sym(str, len);
+  /* Make the symbol, or keyword. NOTE: Sym("foo") == Key("foo") */
+  if (str[0] == ':') {
+    keywordp = 1;
+    sym = mk_sym(str, len, keywordp);
+  }
+  else {
+    sym = mk_sym(str, len, keywordp);
+  }
 
   if (Symtab_index < Symtab_alloc) {
     Symtab[Symtab_index++] = sym;
@@ -542,7 +542,7 @@ cdr(obj_t *a)
   return a->cons.cdr;
 }
 
-int
+static int
 length(obj_t *a)
 {
   int i = 0;
@@ -556,7 +556,7 @@ length(obj_t *a)
 }
 
 static obj_t *
-extend(obj_t *env, obj_t *names, obj_t *values)
+env_extend(obj_t *env, obj_t *names, obj_t *values)
 {
   fprintf(stderr, "%d, %d\n\t", length(names), length(values));
   print_object(stderr, names);
@@ -572,7 +572,7 @@ extend(obj_t *env, obj_t *names, obj_t *values)
 }
 
 static obj_t *
-lookup(obj_t *env, obj_t *sym)
+env_lookup(obj_t *env, obj_t *sym)
 {
   obj_t *names, *values, *frame;
 
@@ -598,7 +598,7 @@ lookup(obj_t *env, obj_t *sym)
 }
 
 static obj_t *
-environment(obj_t *a)
+closure_env(obj_t *a)
 {
   if (!a || a->flag != CLOS_T) {
     fprintf(stderr, "ERROR: Attempt to take environment of non-closure\n");
@@ -612,7 +612,7 @@ environment(obj_t *a)
 }
 
 static obj_t *
-params(obj_t *a)
+closure_params(obj_t *a)
 {
   if (!a || a->flag != CLOS_T) {
     fprintf(stderr, "ERROR: Attempt to take params of non-closure\n");
@@ -623,7 +623,7 @@ params(obj_t *a)
 }
 
 static obj_t *
-code(obj_t *a)
+closure_code(obj_t *a)
 {
   if (!a || a->flag != CLOS_T) {
     fprintf(stderr, "ERROR: Attempt to take code of non-closure\n");
@@ -642,6 +642,7 @@ eval(obj_t *a, obj_t *env)
   opcode_t op = OP_DISPATCH;
   if (!a || env->flag != CONS_T) {
     fprintf(stderr, "ERROR: Attempt to eval with improper arguments\n");
+    print_object(stderr, a);
     return NULL;
   }
 
@@ -651,7 +652,7 @@ eval(obj_t *a, obj_t *env)
   Opstack[Opstack_index++] = OP_DONE;
 
   for (;;) {
-    fprintf(stderr, "Trace: (Evaluating Exp)\n\t -> ");
+    fprintf(stderr, "TRACE: (Evaluating Exp)\n\t -> ");
     print_object(stderr, Exp);
     fputc('\n', stderr);
     switch (op) {
@@ -663,8 +664,12 @@ eval(obj_t *a, obj_t *env)
       }
 
       if (Exp->flag == ATOM_T) {
-        if (Exp->atom.flag == SYMBOL_T) {
-          Val = lookup(Env, Exp);
+        if (Exp->atom.flag == KEYWORD_T) {
+          Val = Exp;
+          NEXT(OP_POPJ_RET);
+        }
+        else if (Exp->atom.flag == SYMBOL_T) {
+          Val = env_lookup(Env, Exp);
           if (Val == NULL) {
             fprintf(stderr, "FATAL: Unknown name: '%s'\n", Exp->atom.string.data);
             exit(1);
@@ -782,10 +787,12 @@ eval(obj_t *a, obj_t *env)
         Exp = car(Exp);
       }
       NEXT(OP_DISPATCH);
+
     case OP_APPLY_NO_ARGS:
       fprintf(stderr, "TRACE: OP_APPLY_NO_ARGS\n");
       Args = NIL;
       NEXT(OP_APPLY);
+
     case OP_ARGS:
       fprintf(stderr, "TRACE: OP_ARGS\n");
       Exp = car(Clink);
@@ -799,6 +806,7 @@ eval(obj_t *a, obj_t *env)
       Exp = cdr(Exp);
       Args = NIL;
       NEXT(OP_ARGS_1);
+
     case OP_ARGS_1:
       fprintf(stderr, "TRACE: OP_ARGS_1\n");
       if (cdr(Exp) == NIL) {
@@ -827,6 +835,7 @@ eval(obj_t *a, obj_t *env)
       }
       Exp = car(Exp);
       NEXT(OP_DISPATCH);
+
     case OP_ARGS_2:
       fprintf(stderr, "TRACE: OP_ARGS_2\n");
       Args = car(Clink);
@@ -853,6 +862,7 @@ eval(obj_t *a, obj_t *env)
       Clink = cdr(Clink);
 
       NEXT(OP_APPLY);
+
     case OP_APPLY:
       fprintf(stderr, "TRACE: OP_APPLY\n");
       if (Val && Val->flag == PRIM_T) {
@@ -863,11 +873,11 @@ eval(obj_t *a, obj_t *env)
       else if (Val && Val->flag == CLOS_T) {
         fprintf(stderr, "TRACE: Apply Closure\n\t params(Val): ");
         print_object(stderr, Val);
-        print_object(stderr, params(Val));
+        print_object(stderr, closure_params(Val));
         fputc('\n', stderr);
 
-        Env = extend(environment(Val), params(Val), Args);
-        Exp = code(Val);
+        Env = env_extend(closure_env(Val), closure_params(Val), Args);
+        Exp = closure_code(Val);
 
         NEXT(OP_DISPATCH);
       }
@@ -875,7 +885,7 @@ eval(obj_t *a, obj_t *env)
     case OP_POPJ_RET:
       fprintf(stderr, "TRACE: OP_POPJ_RET\n");
       if (Opstack_index > 0) {
-        op = Opstack[--Opstack_index];
+        op = Opstack[--(Opstack_index)];
       }
       else {
         fprintf(stderr, "FATAL: No ops left on the stack\n");
@@ -896,20 +906,25 @@ eval(obj_t *a, obj_t *env)
 int
 main(int argc, char **argv)
 {
+  sn_t S;
   obj_t *rd, *res;
 
   NIL = cons(NULL, NULL);
-  FN = intern("fn", 2);
-  IF = intern("if", 2);
-  QUOTE = intern("quote", 2);
-
   Env = NIL;
   Exp = NIL;
   Val = NIL;
   Clink = NIL;
   Opstack = malloc(sizeof(*Opstack) * OPSTACK_INIT_SIZE);
   Opstack_alloc = OPSTACK_INIT_SIZE;
+  Opstack_index = 0;
   Args = NIL;
+  Symtab = NULL;
+  Symtab_index = 0;
+  Symtab_alloc = 0;
+
+  FN = intern("fn", 2);
+  IF = intern("if", 2);
+  QUOTE = intern("quote", 5);
 
   while (!feof(stdin)) {
     fputs("lll> ", stdout);
@@ -918,15 +933,16 @@ main(int argc, char **argv)
     if (rd == NULL) {
       fflush(stdin);
     }
-
-    res = eval(rd, Env);
-    if (res != NULL) {
-      fputs("  => ", stdout);
-      print_object(stdout, res);
-      fputc('\n', stdout);
-    }
     else {
-      fflush(stdin);
+      res = eval(rd, Env);
+      if (res != NULL) {
+        fputs("  => ", stdout);
+        print_object(stdout, res);
+        fputc('\n', stdout);
+      }
+      else {
+        fflush(stdin);
+      }
     }
   }
 
