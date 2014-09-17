@@ -15,28 +15,15 @@ typedef int32_t sn_int_t;
 
 #include "lll.h"
 
-obj_t *NIL;
-obj_t *Env;
-obj_t *Exp;
-obj_t *Clink;
-obj_t *Val;
-obj_t *Args;
-obj_t *FN;
-obj_t *IF;
-obj_t *QUOTE;
-obj_t **Symtab = NULL;
-size_t Symtab_alloc = 0;
-int Symtab_index = 0;
-opcode_t *Opstack = NULL;
-size_t Opstack_alloc = 0;
-int Opstack_index = 0;
 
+static void print_atom(sn_t *S, FILE *out, atom_t a);
+static void print_cons(sn_t *S, FILE *out, cons_t a);
 
-static void print_atom(FILE *out, atom_t a);
-static void print_cons(FILE *out, cons_t a);
+#define isdelim(ch) (isspace(ch) || ch == '(' || ch == ')' || ch == '"')
+
 
 static void
-print_atom(FILE *out, atom_t a)
+print_atom(sn_t *S, FILE *out, atom_t a)
 {
   int i;
   switch (a.flag) {
@@ -67,7 +54,7 @@ print_atom(FILE *out, atom_t a)
 }
 
 static void
-print_cons(FILE *out, cons_t a)
+print_cons(sn_t *S, FILE *out, cons_t a)
 {
   obj_t *obj;
 
@@ -77,7 +64,7 @@ print_cons(FILE *out, cons_t a)
   } 
   fputc('(', out);
   for (obj = a.car; obj; ) {
-    print_object(out, obj);
+    print_object(S, out, obj);
     
     obj = a.cdr;
     if (obj && obj->flag == CONS_T) {
@@ -90,7 +77,7 @@ print_cons(FILE *out, cons_t a)
     } 
     else if (obj) {
       fputc(' ', out);
-      print_object(out, obj);
+      print_object(S, out, obj);
       obj = NULL;
     }
   }
@@ -98,18 +85,18 @@ print_cons(FILE *out, cons_t a)
 }
 
 void
-print_object(FILE *out, obj_t *o)
+print_object(sn_t *S, FILE *out, obj_t *o)
 {
   switch (o->flag) {
   case ATOM_T:
-    print_atom(out, o->atom);
+    print_atom(S, out, o->atom);
     break;
   case CONS_T:
-    print_cons(out, o->cons);
+    print_cons(S, out, o->cons);
     break;
   case CLOS_T:
     fputs("<#Closure: ", out);
-    print_cons(out, o->cons);
+    print_cons(S, out, o->cons);
     fputs(">", out);
     break;
   case PRIM_T:
@@ -122,7 +109,7 @@ print_object(FILE *out, obj_t *o)
 }
 
 static obj_t *
-read_string(FILE *in)
+read_string(sn_t *S, FILE *in)
 {
   char buffer[255];
   int bufi = 0;
@@ -136,7 +123,7 @@ read_string(FILE *in)
     }
     if (ch == '"') {
       buffer[bufi] = '\0';
-      return mk_str(buffer, bufi);
+      return mk_str(S, buffer, bufi);
     }
     else if (ch == '\\') {
       la = fgetc(in);
@@ -174,7 +161,7 @@ read_string(FILE *in)
 }
 
 static obj_t *
-read_number(FILE *in, int negative)
+read_number(sn_t *S, FILE *in, int negative)
 {
   char buffer[32];
   int bufi = 0;
@@ -203,7 +190,7 @@ read_number(FILE *in, int negative)
         sawdot = 1;
       }
     }
-    else if (isspace(ch) || ch == '(' || ch == ')' || ch == '"') {
+    else if (isdelim(ch)) {
       ungetc(ch, in);
       /* have our number. Let's do it */
       buffer[bufi] = '\0';
@@ -213,14 +200,14 @@ read_number(FILE *in, int negative)
           if (negative) {
             floval *= -1.0;
           }
-          return mk_flonum(floval);
+          return mk_flonum(S, floval);
         }
         else {
           fixval = strtol(buffer, NULL, 10);
           if (negative) {
             fixval *= -1L;
           }
-          return mk_fixnum(fixval);
+          return mk_fixnum(S, fixval);
         }
       }
       else {
@@ -234,7 +221,7 @@ read_number(FILE *in, int negative)
 }
 
 static obj_t *
-read_symbol(FILE *in)
+read_symbol(sn_t *S, FILE *in)
 {
   char buffer[255];
   int bufi = 0;
@@ -253,13 +240,13 @@ read_symbol(FILE *in)
     else if (ch == '.') { /* TODO: Need to turn this into a refer form ideally ... */
       buffer[bufi++] = ch;
     }
-    else if (isgraph(ch) && !isspace(ch) && ch != '(' && ch != ')' && ch != '"') {
+    else if (isgraph(ch) && !isdelim(ch)) {
       buffer[bufi++] = ch;
     }
-    else if (isspace(ch) || ch == '(' || ch == ')' || ch == '"') {
+    else if (isdelim(ch)) {
       ungetc(ch, in);
       buffer[bufi] = '\0';
-      return intern(buffer, bufi);
+      return intern(S, buffer, bufi);
     }
     else {
       fprintf(stderr, "ERROR: Invalid symbol character\n");
@@ -279,7 +266,7 @@ eat_space(FILE *in)
 }
 
 static obj_t *
-read_list(FILE *in)
+read_list(sn_t *S, FILE *in)
 {
   obj_t *obj;
   int ch;
@@ -291,32 +278,29 @@ read_list(FILE *in)
 
   /* Is this just nil? */
   if (ch == ')') {
-    return NIL;
+    return S->NIL;
   }
   else {
     ungetc(ch, in);
   }
 
   /* Ok. Legitimate list it seems. Let's read it recursively */
-  obj = read_object(in);
+  obj = read_object(S, in);
   if (!obj) {
     return obj;
   }
 
-  print_object(stdout, obj);
-
-  ch = eat_space(in); printf("Ate space\n");
-
+  ch = eat_space(in);
   if (ch == ')') {
-    return cons(obj, NIL);
+    return cons(S, obj, S->NIL);
   } 
 
   ungetc(ch, in);
-  return cons(obj, read_list(in));
+  return cons(S, obj, read_list(S, in));
 }
 
 obj_t *
-read_object(FILE *in)
+read_object(sn_t *S, FILE *in)
 {
   obj_t *tmp;
   int ch, la;
@@ -328,7 +312,7 @@ read_object(FILE *in)
 
   switch (ch) {
   case '(':
-    return read_list(in);
+    return read_list(S, in);
   case ';': /* read til end of line */
     while ((ch = fgetc(in)) != '\n') {
       if (ch == EOF) {
@@ -342,11 +326,11 @@ read_object(FILE *in)
   case '\r':
     goto next;
   case '"':
-    return read_string(in);
+    return read_string(S, in);
   case '\'':
-    tmp = read_object(in);
+    tmp = read_object(S, in);
     if (tmp != NULL) {
-      return cons(QUOTE, cons(tmp, NIL));
+      return cons(S, S->QUOTE, cons(S,tmp, S->NIL));
     }
     return tmp;
   case '-':
@@ -358,7 +342,7 @@ read_object(FILE *in)
     }
     if (isdigit(la)) {
       ungetc(la, in);
-      return read_number(in, ch == '-');
+      return read_number(S, in, ch == '-');
     }
     else {
       ungetc(la, in);
@@ -366,15 +350,15 @@ read_object(FILE *in)
   default:
     ungetc(ch, in);
     if (isdigit(ch)) {
-      return read_number(in, 0);
+      return read_number(S, in, 0);
     }
   }
   fprintf(stderr, "Reading a symbol.\n");
-  return read_symbol(in);
+  return read_symbol(S, in);
 }
 
 obj_t *
-mk_fixnum(long d)
+mk_fixnum(sn_t *S, long d)
 {
   obj_t *o = malloc(sizeof(*o));
   if (o == NULL) {
@@ -390,7 +374,7 @@ mk_fixnum(long d)
 }
 
 obj_t *
-mk_flonum(double d)
+mk_flonum(sn_t *S, double d)
 {
   obj_t *o = malloc(sizeof(*o));
   if (o == NULL) {
@@ -406,7 +390,7 @@ mk_flonum(double d)
 }
 
 obj_t *
-mk_str(char *str, size_t len)
+mk_str(sn_t *S, char *str, size_t len)
 {
   obj_t *o = malloc(sizeof(*o));
   if (o == NULL) {
@@ -423,7 +407,7 @@ mk_str(char *str, size_t len)
 }
 
 obj_t *
-mk_sym(char *str, size_t len, int keywordp)
+mk_sym(sn_t *S, char *str, size_t len, int keywordp)
 {
   obj_t *o = malloc(sizeof(*o));
   if (o == NULL) {
@@ -440,17 +424,17 @@ mk_sym(char *str, size_t len, int keywordp)
 }
 
 obj_t *
-intern(char *str, size_t len)
+intern(sn_t *S, char *str, size_t len)
 {
   int i, keywordp = 0;
   obj_t *sym;
-  if (Symtab_index > 0) {
-    for (i = 0; i < Symtab_index; i++) {
-      if (len != Symtab[i]->atom.string.length) {
+  if (S->Symtab_index > 0) {
+    for (i = 0; i < S->Symtab_index; i++) {
+      if (len != S->Symtab[i]->atom.string.length) {
         continue;
       }
-      if (strncmp(Symtab[i]->atom.string.data, str, len) == 0) {
-        return Symtab[i];
+      if (strncmp(S->Symtab[i]->atom.string.data, str, len) == 0) {
+        return S->Symtab[i];
       }
     }
   }
@@ -458,48 +442,48 @@ intern(char *str, size_t len)
   /* Make the symbol, or keyword. NOTE: Sym("foo") == Key("foo") */
   if (str[0] == ':') {
     keywordp = 1;
-    sym = mk_sym(str, len, keywordp);
+    sym = mk_sym(S, str, len, keywordp);
   }
   else {
-    sym = mk_sym(str, len, keywordp);
+    sym = mk_sym(S, str, len, keywordp);
   }
 
-  if (Symtab_index < Symtab_alloc) {
-    Symtab[Symtab_index++] = sym;
+  if (S->Symtab_index < S->Symtab_alloc) {
+    S->Symtab[S->Symtab_index++] = sym;
     return sym;
   }
-  else if (Symtab_alloc == 0) {
-    Symtab = malloc(sizeof(*Symtab) * SYMTAB_INIT_SIZE);
-    if (Symtab == NULL) {
+  else if (S->Symtab_alloc == 0) {
+    S->Symtab = malloc(sizeof(*S->Symtab) * SYMTAB_INIT_SIZE);
+    if (S->Symtab == NULL) {
       perror("malloc");
       exit(1);
     }
-    Symtab_alloc = SYMTAB_INIT_SIZE;
+    S->Symtab_alloc = SYMTAB_INIT_SIZE;
   }
   else { /* resize it */
-    Symtab_alloc *= 2;
-    Symtab = realloc(Symtab, sizeof(*Symtab) * Symtab_alloc);
-    if (Symtab == NULL) {
+    S->Symtab_alloc *= 2;
+    S->Symtab = realloc(S->Symtab, sizeof(*S->Symtab) * S->Symtab_alloc);
+    if (S->Symtab == NULL) {
       perror("realloc");
       exit(1);
     }
   }
 
-  Symtab[Symtab_index++] = sym;
+  S->Symtab[S->Symtab_index++] = sym;
   return sym;
 }
 
 obj_t *
-mk_clos(obj_t *code, obj_t *env)
+mk_clos(sn_t *S, obj_t *code, obj_t *env)
 {
-  obj_t *o = cons(code, env);
+  obj_t *o = cons(S, code, env);
   o->flag = CLOS_T;
 
   return o;
 }
 
 obj_t *
-cons(obj_t *a, obj_t *d)
+cons(sn_t *S, obj_t *a, obj_t *d)
 {
   obj_t *o = malloc(sizeof(*o));
   if (o == NULL) {
@@ -515,7 +499,7 @@ cons(obj_t *a, obj_t *d)
 }
 
 obj_t *
-car(obj_t *a)
+car(sn_t *S, obj_t *a)
 {
   if (!a || a->flag != CONS_T) {
     fprintf(stderr, "ERROR: Attempt to take car of non-cons\n");
@@ -523,13 +507,13 @@ car(obj_t *a)
   }
 
   if (a->cons.car == NULL) {
-    return NIL;
+    return S->NIL;
   }
   return a->cons.car;
 }
 
 obj_t *
-cdr(obj_t *a)
+cdr(sn_t *S, obj_t *a)
 {
   if (!a || a->flag != CONS_T) {
     fprintf(stderr, "ERROR: Attempt to take cdr of non-cons\n");
@@ -537,68 +521,68 @@ cdr(obj_t *a)
   }
 
   if (a->cons.cdr == NULL) {
-    return NIL;
+    return S->NIL;
   }
   return a->cons.cdr;
 }
 
 static int
-length(obj_t *a)
+length(sn_t *S, obj_t *a)
 {
   int i = 0;
   if (a->flag == CONS_T) {
-    while (a != NULL && a != NIL) {
+    while (a != NULL && a != S->NIL) {
       i++;
-      a = cdr(a);
+      a = cdr(S, a);
     }
   }
   return i;
 }
 
 static obj_t *
-env_extend(obj_t *env, obj_t *names, obj_t *values)
+env_extend(sn_t *S, obj_t *env, obj_t *names, obj_t *values)
 {
-  fprintf(stderr, "%d, %d\n\t", length(names), length(values));
-  print_object(stderr, names);
+  fprintf(stderr, "%d, %d\n\t", length(S, names), length(S, values));
+  print_object(S, stderr, names);
   fputs(", ", stderr);
-  print_object(stderr, values);
+  print_object(S, stderr, values);
   fputc('\n', stderr);
 
-  if (length(names) == length(values)) {
-    return cons(cons(names, values), env);
+  if (length(S, names) == length(S, values)) {
+    return cons(S, cons(S, names, values), env);
   }
   fprintf(stderr, "FATAL: Too few names, or values in extend\n");
   exit(1);
 }
 
 static obj_t *
-env_lookup(obj_t *env, obj_t *sym)
+env_lookup(sn_t *S, obj_t *env, obj_t *sym)
 {
   obj_t *names, *values, *frame;
 
-  while (env != NIL && env != NULL) {
-    frame = car(env);
-    names = car(frame);
-    values = cdr(frame);
+  while (env != S->NIL && env != NULL) {
+    frame = car(S, env);
+    names = car(S, frame);
+    values = cdr(S, frame);
 
-    while (names != NIL) {
-      if (car(names) == sym) {
-        return car(values);
+    while (names != S->NIL) {
+      if (car(S, names) == sym) {
+        return car(S, values);
       }
       else {
-        names = cdr(names);
-        values = cdr(values);
+        names = cdr(S, names);
+        values = cdr(S, values);
       }
     }
 
-    env = cdr(env);
+    env = cdr(S, env);
   }
 
   return NULL;
 }
 
 static obj_t *
-closure_env(obj_t *a)
+closure_env(sn_t *S, obj_t *a)
 {
   if (!a || a->flag != CLOS_T) {
     fprintf(stderr, "ERROR: Attempt to take environment of non-closure\n");
@@ -606,35 +590,35 @@ closure_env(obj_t *a)
   }
 
   if (a->cons.cdr == NULL) {
-    return NIL;
+    return S->NIL;
   }
   return a->cons.cdr;
 }
 
 static obj_t *
-closure_params(obj_t *a)
+closure_params(sn_t *S, obj_t *a)
 {
   if (!a || a->flag != CLOS_T) {
     fprintf(stderr, "ERROR: Attempt to take params of non-closure\n");
     return NULL;
   }
 
-  return car(a->cons.car);
+  return car(S, a->cons.car);
 }
 
 static obj_t *
-closure_code(obj_t *a)
+closure_code(sn_t *S, obj_t *a)
 {
   if (!a || a->flag != CLOS_T) {
     fprintf(stderr, "ERROR: Attempt to take code of non-closure\n");
     return NULL;
   }
 
-  return cdr(a->cons.car);
+  return cdr(S, a->cons.car);
 }
 
 obj_t *
-eval(obj_t *a, obj_t *env)
+eval(sn_t *S, obj_t *a, obj_t *env)
 {
 #define NEXT(P) op = P; break;
 
@@ -642,73 +626,73 @@ eval(obj_t *a, obj_t *env)
   opcode_t op = OP_DISPATCH;
   if (!a || env->flag != CONS_T) {
     fprintf(stderr, "ERROR: Attempt to eval with improper arguments\n");
-    print_object(stderr, a);
+    print_object(S, stderr, a);
     return NULL;
   }
 
-  Env = env;
-  Exp = a;
+  S->Env = env;
+  S->Exp = a;
 
-  Opstack[Opstack_index++] = OP_DONE;
+  S->Opstack[S->Opstack_index++] = OP_DONE;
 
   for (;;) {
     fprintf(stderr, "TRACE: (Evaluating Exp)\n\t -> ");
-    print_object(stderr, Exp);
+    print_object(S, stderr, S->Exp);
     fputc('\n', stderr);
     switch (op) {
     case OP_DISPATCH:
       fprintf(stderr, "TRACE: OP_DISPATCH\n");
-      if (Exp == NIL) {
-        Val = NIL;
+      if (S->Exp == S->NIL) {
+        S->Val = S->NIL;
         NEXT(OP_POPJ_RET);
       }
 
-      if (Exp->flag == ATOM_T) {
-        if (Exp->atom.flag == KEYWORD_T) {
-          Val = Exp;
+      if (S->Exp->flag == ATOM_T) {
+        if (S->Exp->atom.flag == KEYWORD_T) {
+          S->Val = S->Exp;
           NEXT(OP_POPJ_RET);
         }
-        else if (Exp->atom.flag == SYMBOL_T) {
-          Val = env_lookup(Env, Exp);
-          if (Val == NULL) {
-            fprintf(stderr, "FATAL: Unknown name: '%s'\n", Exp->atom.string.data);
+        else if (S->Exp->atom.flag == SYMBOL_T) {
+          S->Val = env_lookup(S, S->Env, S->Exp);
+          if (S->Val == NULL) {
+            fprintf(stderr, "FATAL: Unknown name: '%s'\n", S->Exp->atom.string.data);
             exit(1);
           }
           NEXT(OP_POPJ_RET);
         }
         else {
-          Val = Exp;
+          S->Val = S->Exp;
           NEXT(OP_POPJ_RET);
         }
       }
-      else if (Exp->flag == CLOS_T || Exp->flag == PRIM_T) {
-        Val = Exp;
+      else if (S->Exp->flag == CLOS_T || S->Exp->flag == PRIM_T) {
+        S->Val = S->Exp;
         NEXT(OP_POPJ_RET);
       }
-      else if (Exp->flag == CONS_T) {
-        ar = car(Exp);
+      else if (S->Exp->flag == CONS_T) {
+        ar = car(S, S->Exp);
 
-        if (ar == QUOTE) {
-          Val = car(cdr(Exp));
+        if (ar == S->QUOTE) {
+          S->Val = car(S, cdr(S, S->Exp));
           NEXT(OP_POPJ_RET);
         }
-        else if (ar == IF) {
-          dr = cdr(Exp);
+        else if (ar == S->IF) {
+          dr = cdr(S, S->Exp);
           if (dr->flag == CONS_T) {
-            Exp = car(dr);
+            S->Exp = car(S, dr);
             fprintf(stderr, "Going to evaluate: ");
-            print_object(stderr, Exp);
+            print_object(S, stderr, S->Exp);
             fputc('\n', stderr);
             
-            Clink = cons(Env, Clink);
-            Clink = cons(cdr(dr), Clink);
+            S->Clink = cons(S, S->Env, S->Clink);
+            S->Clink = cons(S, cdr(S, dr), S->Clink);
 
             fprintf(stderr, "Clinking: ");
-            print_object(stderr, cdr(dr));
+            print_object(S, stderr, cdr(S, dr));
             fputc('\n', stderr);
 
-            if (Opstack_index < Opstack_alloc) {
-              Opstack[Opstack_index++] = OP_IF_DECIDE;
+            if (S->Opstack_index < S->Opstack_alloc) {
+              S->Opstack[S->Opstack_index++] = OP_IF_DECIDE;
             }
             else {
               fprintf(stderr, "FATAL: Stack overflow in eval, OP_DISPATCH\n");
@@ -722,12 +706,12 @@ eval(obj_t *a, obj_t *env)
 
           NEXT(OP_DISPATCH);
         }
-        else if (ar == FN) {
-          dr = cdr(Exp);
+        else if (ar == S->FN) {
+          dr = cdr(S, S->Exp);
           if (dr && dr->flag == CONS_T) {
-            ar = car(dr);
+            ar = car(S, dr);
             if (ar && ar->flag == CONS_T) {
-              Val = mk_clos(dr, Env);
+              S->Val = mk_clos(S, dr, S->Env);
             }
             else {
               fprintf(stderr, "FATAL: Syntax error in fn declaration\n");
@@ -740,30 +724,30 @@ eval(obj_t *a, obj_t *env)
           }
           NEXT(OP_POPJ_RET);
         }
-        else if (cdr(Exp) == NIL) {
-          if (Opstack_index < Opstack_alloc) {
-            Opstack[Opstack_index++] = OP_APPLY_NO_ARGS;
+        else if (cdr(S, S->Exp) == S->NIL) {
+          if (S->Opstack_index < S->Opstack_alloc) {
+            S->Opstack[S->Opstack_index++] = OP_APPLY_NO_ARGS;
           }
           else {
             fprintf(stderr, "FATAL: Stack overflow in eval, OP_DISPATCH\n");
             exit(1);
           }
 
-          Exp = car(Exp);
+          S->Exp = car(S, S->Exp);
         }
         else {
-          Clink = cons(Env, Clink);
-          Clink = cons(Exp, Clink);
+          S->Clink = cons(S, S->Env, S->Clink);
+          S->Clink = cons(S, S->Exp, S->Clink);
 
-          if (Opstack_index < Opstack_alloc) {
-            Opstack[Opstack_index++] = OP_ARGS;
+          if (S->Opstack_index < S->Opstack_alloc) {
+            S->Opstack[S->Opstack_index++] = OP_ARGS;
           }
           else {
             fprintf(stderr, "FATAL: Stack overflow in eval, OP_DISPATCH\n");
             exit(1);
           }
 
-          Exp = car(Exp);
+          S->Exp = car(S, S->Exp);
         }
 
         NEXT(OP_DISPATCH);
@@ -774,46 +758,46 @@ eval(obj_t *a, obj_t *env)
 
     case OP_IF_DECIDE:
       fprintf(stderr, "TRACE: OP_IF_DECIDE\n");
-      Exp = car(Clink);
-      Clink = cdr(Clink);
+      S->Exp = car(S, S->Clink);
+      S->Clink = cdr(S, S->Clink);
 
-      Env = car(Clink);
-      Clink = cdr(Clink);
+      S->Env = car(S, S->Clink);
+      S->Clink = cdr(S, S->Clink);
 
-      if (Val == NIL) {
-        Exp = cdr(Exp);
+      if (S->Val == S->NIL) {
+        S->Exp = cdr(S, S->Exp);
       }
       else {
-        Exp = car(Exp);
+        S->Exp = car(S, S->Exp);
       }
       NEXT(OP_DISPATCH);
 
     case OP_APPLY_NO_ARGS:
       fprintf(stderr, "TRACE: OP_APPLY_NO_ARGS\n");
-      Args = NIL;
+      S->Args = S->NIL;
       NEXT(OP_APPLY);
 
     case OP_ARGS:
       fprintf(stderr, "TRACE: OP_ARGS\n");
-      Exp = car(Clink);
-      Clink = cdr(Clink);
+      S->Exp = car(S, S->Clink);
+      S->Clink = cdr(S, S->Clink);
 
-      Env = car(Clink);
-      Clink = cdr(Clink);
+      S->Env = car(S, S->Clink);
+      S->Clink = cdr(S, S->Clink);
 
-      Clink = cons(Val, Clink);
+      S->Clink = cons(S, S->Val, S->Clink);
 
-      Exp = cdr(Exp);
-      Args = NIL;
+      S->Exp = cdr(S, S->Exp);
+      S->Args = S->NIL;
       NEXT(OP_ARGS_1);
 
     case OP_ARGS_1:
       fprintf(stderr, "TRACE: OP_ARGS_1\n");
-      if (cdr(Exp) == NIL) {
-        Clink = cons(Args, Clink);
+      if (cdr(S, S->Exp) == S->NIL) {
+        S->Clink = cons(S, S->Args, S->Clink);
 
-        if (Opstack_index < Opstack_alloc) {
-          Opstack[Opstack_index++] = OP_LAST_ARG;
+        if (S->Opstack_index < S->Opstack_alloc) {
+          S->Opstack[S->Opstack_index++] = OP_LAST_ARG;
         }
         else {
           fprintf(stderr, "FATAL: Stack overflow in eval, OP_ARGS_1\n");
@@ -821,71 +805,71 @@ eval(obj_t *a, obj_t *env)
         }
       }
       else {
-        Clink = cons(Env, Clink);
-        Clink = cons(Exp, Clink);
-        Clink = cons(Args, Clink);
+        S->Clink = cons(S, S->Env, S->Clink);
+        S->Clink = cons(S, S->Exp, S->Clink);
+        S->Clink = cons(S, S->Args, S->Clink);
 
-        if (Opstack_index < Opstack_alloc) {
-          Opstack[Opstack_index++] = OP_ARGS_2;
+        if (S->Opstack_index < S->Opstack_alloc) {
+          S->Opstack[S->Opstack_index++] = OP_ARGS_2;
         }
         else {
           fprintf(stderr, "FATAL: Stack overflow in eval, OP_ARGS_1\n");
           exit(1);
         }
       }
-      Exp = car(Exp);
+      S->Exp = car(S, S->Exp);
       NEXT(OP_DISPATCH);
 
     case OP_ARGS_2:
       fprintf(stderr, "TRACE: OP_ARGS_2\n");
-      Args = car(Clink);
-      Clink = cdr(Clink);
+      S->Args = car(S, S->Clink);
+      S->Clink = cdr(S, S->Clink);
 
-      Exp = car(Clink);
-      Clink = cdr(Clink);
+      S->Exp = car(S, S->Clink);
+      S->Clink = cdr(S, S->Clink);
 
-      Env = car(Clink);
-      Clink = cdr(Clink);
+      S->Env = car(S, S->Clink);
+      S->Clink = cdr(S, S->Clink);
       
-      Args = cons(Val, Args);
-      Exp = cdr(Exp);
+      S->Args = cons(S, S->Val, S->Args);
+      S->Exp = cdr(S, S->Exp);
       NEXT(OP_ARGS_1);
 
     case OP_LAST_ARG:
       fprintf(stderr, "TRACE: OP_LAST_ARG\n");
-      Args = car(Clink);
-      Clink = cdr(Clink);
+      S->Args = car(S, S->Clink);
+      S->Clink = cdr(S, S->Clink);
 
-      Args = cons(Val, Args);
+      S->Args = cons(S, S->Val, S->Args);
 
-      Val = car(Clink);
-      Clink = cdr(Clink);
+      S->Val = car(S, S->Clink);
+      S->Clink = cdr(S, S->Clink);
 
       NEXT(OP_APPLY);
 
     case OP_APPLY:
       fprintf(stderr, "TRACE: OP_APPLY\n");
-      if (Val && Val->flag == PRIM_T) {
-        Val = Val->prim.func(Args);
+      if (S->Val && S->Val->flag == PRIM_T) {
+        S->Val = S->Val->prim.func(S->Args);
 
         NEXT(OP_POPJ_RET);
       }
-      else if (Val && Val->flag == CLOS_T) {
+      else if (S->Val && S->Val->flag == CLOS_T) {
         fprintf(stderr, "TRACE: Apply Closure\n\t params(Val): ");
-        print_object(stderr, Val);
-        print_object(stderr, closure_params(Val));
+        print_object(S, stderr, S->Val);
+        print_object(S, stderr, closure_params(S, S->Val));
         fputc('\n', stderr);
 
-        Env = env_extend(closure_env(Val), closure_params(Val), Args);
-        Exp = closure_code(Val);
+        S->Env = env_extend(S, closure_env(S, S->Val), closure_params(S, S->Val), S->Args);
+        S->Exp = closure_code(S, S->Val);
 
         NEXT(OP_DISPATCH);
       }
       /* TODO: Error: unable to apply this */
     case OP_POPJ_RET:
       fprintf(stderr, "TRACE: OP_POPJ_RET\n");
-      if (Opstack_index > 0) {
-        op = Opstack[--(Opstack_index)];
+      if (S->Opstack_index > 0) {
+        op = S->Opstack[--(S->Opstack_index)];
       }
       else {
         fprintf(stderr, "FATAL: No ops left on the stack\n");
@@ -895,11 +879,11 @@ eval(obj_t *a, obj_t *env)
     case OP_DONE:
       fprintf(stderr, "TRACE: OP_DONE\n");
     default:
-      return Val;
+      return S->Val;
     }
   }
 
-  return NIL;
+  return S->NIL;
 }
 
 
@@ -909,35 +893,35 @@ main(int argc, char **argv)
   sn_t S;
   obj_t *rd, *res;
 
-  NIL = cons(NULL, NULL);
-  Env = NIL;
-  Exp = NIL;
-  Val = NIL;
-  Clink = NIL;
-  Opstack = malloc(sizeof(*Opstack) * OPSTACK_INIT_SIZE);
-  Opstack_alloc = OPSTACK_INIT_SIZE;
-  Opstack_index = 0;
-  Args = NIL;
-  Symtab = NULL;
-  Symtab_index = 0;
-  Symtab_alloc = 0;
+  S.NIL = cons(&S, NULL, NULL);
+  S.Env = S.NIL;
+  S.Exp = S.NIL;
+  S.Val = S.NIL;
+  S.Clink = S.NIL;
+  S.Opstack = malloc(sizeof(*S.Opstack) * OPSTACK_INIT_SIZE);
+  S.Opstack_alloc = OPSTACK_INIT_SIZE;
+  S.Opstack_index = 0;
+  S.Args = S.NIL;
+  S.Symtab = NULL;
+  S.Symtab_index = 0;
+  S.Symtab_alloc = 0;
 
-  FN = intern("fn", 2);
-  IF = intern("if", 2);
-  QUOTE = intern("quote", 5);
+  S.FN = intern(&S, "fn", 2);
+  S.IF = intern(&S, "if", 2);
+  S.QUOTE = intern(&S, "quote", 5);
 
   while (!feof(stdin)) {
     fputs("lll> ", stdout);
     
-    rd = read_object(stdin);
+    rd = read_object(&S, stdin);
     if (rd == NULL) {
       fflush(stdin);
     }
     else {
-      res = eval(rd, Env);
+      res = eval(&S, rd, S.Env);
       if (res != NULL) {
         fputs("  => ", stdout);
-        print_object(stdout, res);
+        print_object(&S, stdout, res);
         fputc('\n', stdout);
       }
       else {

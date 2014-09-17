@@ -70,22 +70,37 @@ struct obj {
 };
 
 typedef struct sn {
+  obj_t *NIL;
+  obj_t *Env;
+  obj_t *Exp;
+  obj_t *Clink;
+  obj_t *Val;
+  obj_t *Args;
+  obj_t *FN;
+  obj_t *IF;
+  obj_t *QUOTE;
+  obj_t **Symtab;
+  size_t Symtab_alloc;
+  int Symtab_index;
+  opcode_t *Opstack;
+  size_t Opstack_alloc;
+  int Opstack_index;
 } sn_t;
 
-void print_object(FILE *out, obj_t *o);
-obj_t *read_object(FILE *in);
+void print_object(sn_t *S, FILE *out, obj_t *o);
+obj_t *read_object(sn_t *S, FILE *in);
 
-obj_t *mk_fixnum(long d);
-obj_t *mk_flonum(double d);
-obj_t *mk_str(char *str, size_t len);
-obj_t *mk_sym(char *str, size_t len, int keywordp);
-obj_t *intern(char *str, size_t len);
-obj_t *mk_clos(obj_t *code, obj_t *env);
+obj_t *mk_fixnum(sn_t *S, long d);
+obj_t *mk_flonum(sn_t *S, double d);
+obj_t *mk_str(sn_t *S, char *str, size_t len);
+obj_t *mk_sym(sn_t *S, char *str, size_t len, int keywordp);
+obj_t *intern(sn_t *S, char *str, size_t len);
+obj_t *mk_clos(sn_t *S, obj_t *code, obj_t *env);
 
-obj_t *cons(obj_t *a, obj_t *d);
-obj_t *car(obj_t *a);
-obj_t *cdr(obj_t *a);
+obj_t *cons(sn_t *S, obj_t *a, obj_t *d);
+obj_t *car(sn_t *S, obj_t *a);
+obj_t *cdr(sn_t *S, obj_t *a);
 
-obj_t *eval(obj_t *a, obj_t *env);
+obj_t *eval(sn_t *S, obj_t *a, obj_t *env);
 
 #endif
