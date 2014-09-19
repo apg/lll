@@ -225,7 +225,8 @@ read_symbol(sn_t *S, FILE *in)
 {
   char buffer[255];
   int bufi = 0;
-  int ch, la;
+  int ch, la, sawdot = -1;
+  obj_t *module, *identifier;
 
   while (bufi < 255) {
     ch = fgetc(in);
@@ -238,6 +239,7 @@ read_symbol(sn_t *S, FILE *in)
       buffer[bufi++] = ch;
     }
     else if (ch == '.') { /* TODO: Need to turn this into a refer form ideally ... */
+      sawdot = bufi;
       buffer[bufi++] = ch;
     }
     else if (isgraph(ch) && !isdelim(ch)) {
@@ -246,6 +248,19 @@ read_symbol(sn_t *S, FILE *in)
     else if (isdelim(ch)) {
       ungetc(ch, in);
       buffer[bufi] = '\0';
+
+      /* This is a bit hacky */
+      if (sawdot > 0) {
+        buffer[sawdot] = '\0';
+        module = intern(S, buffer, sawdot);
+        buffer[sawdot] = ':';
+        identifier = intern(S, buffer + sawdot, bufi - sawdot);
+        /* TODO: potentially namespace the refer */
+        return cons(S, intern(S, "refer", 5),
+                    cons(S, module, 
+                         cons(S, identifier, S->NIL)));
+      }
+
       return intern(S, buffer, bufi);
     }
     else {
