@@ -368,7 +368,6 @@ read_object(sn_t *S, FILE *in)
       return read_number(S, in, 0);
     }
   }
-  fprintf(stderr, "Reading a symbol.\n");
   return read_symbol(S, in);
 }
 
@@ -498,6 +497,24 @@ mk_clos(sn_t *S, obj_t *code, obj_t *env)
 }
 
 obj_t *
+mk_prim(sn_t *S, obj_t *(*func)(sn_t *, obj_t *), int arity, int max_arity)
+{
+  obj_t *o = malloc(sizeof(*o));
+  if (o == NULL) {
+    perror("malloc");
+    exit(1);
+  }
+
+  o->flag = PRIM_T;
+  o->prim.arity = arity;
+  o->prim.max_arity = arity;
+  o->prim.func = func;
+
+  return o;
+}
+
+
+obj_t *
 cons(sn_t *S, obj_t *a, obj_t *d)
 {
   obj_t *o = malloc(sizeof(*o));
@@ -541,11 +558,12 @@ cdr(sn_t *S, obj_t *a)
   return a->cons.cdr;
 }
 
-static int
+int
 length(sn_t *S, obj_t *a)
 {
   int i = 0;
   if (a->flag == CONS_T) {
+    /* TODO this doesnt' handle cycles... */
     while (a != NULL && a != S->NIL) {
       i++;
       a = cdr(S, a);
@@ -557,11 +575,14 @@ length(sn_t *S, obj_t *a)
 static obj_t *
 env_extend(sn_t *S, obj_t *env, obj_t *names, obj_t *values)
 {
+
+#ifdef TRACE_DEBUG
   fprintf(stderr, "%d, %d\n\t", length(S, names), length(S, values));
   print_object(S, stderr, names);
   fputs(", ", stderr);
   print_object(S, stderr, values);
   fputc('\n', stderr);
+#endif
 
   if (length(S, names) == length(S, values)) {
     return cons(S, cons(S, names, values), env);
@@ -632,6 +653,50 @@ closure_code(sn_t *S, obj_t *a)
   return cdr(S, a->cons.car);
 }
 
+/**
+ * TODO: This is a temporary measure to get builtins installed.
+ *       It should in the future actually use the module facility by
+ *       creating a module, and adding the functions, and what not.
+ *   
+ *       For now, the module gets installed in a new frame in the
+ *       Environment.
+ */
+obj_t *
+module_install(sn_t *S, char *modname, module_entry_t *mod) 
+{
+  obj_t *names, *values, *name, *value;
+  module_entry_t *current;
+  int i = 0;
+
+  if (mod == NULL) {
+    return S->NIL;
+  }
+
+  names = S->NIL;
+  values = S->NIL;
+
+  while (mod[i].name != NULL) {
+    if (mod[i].name == NULL || mod[i].name[0] == ':') {
+      fprintf(stderr, "ERROR: can't bind value to a keyword\n");
+      return NULL;
+    }
+
+    name = intern(S, mod[i].name, strlen(mod[i].name));
+    names = cons(S, name, names);
+
+    value = mk_prim(S, mod[i].func, mod[i].arity, mod[i].max_arity);
+    values = cons(S, value, values);
+
+    i++;
+  }
+
+  /* TODO: Should really flatten this, but OK for now... */
+  S->Toplevel_Env = env_extend(S, S->Toplevel_Env, names, values);
+
+  return S->NIL;
+}
+
+
 obj_t *
 eval(sn_t *S, obj_t *a, obj_t *env)
 {
@@ -651,12 +716,17 @@ eval(sn_t *S, obj_t *a, obj_t *env)
   S->Opstack[S->Opstack_index++] = OP_DONE;
 
   for (;;) {
+#ifdef TRACE_DEBUG
     fprintf(stderr, "TRACE: (Evaluating Exp)\n\t -> ");
     print_object(S, stderr, S->Exp);
     fputc('\n', stderr);
+#endif
+
     switch (op) {
     case OP_DISPATCH:
+#ifdef TRACE_DEBUG
       fprintf(stderr, "TRACE: OP_DISPATCH\n");
+#endif
       if (S->Exp == S->NIL) {
         S->Val = S->NIL;
         NEXT(OP_POPJ_RET);
@@ -670,8 +740,12 @@ eval(sn_t *S, obj_t *a, obj_t *env)
         else if (S->Exp->atom.flag == SYMBOL_T) {
           S->Val = env_lookup(S, S->Env, S->Exp);
           if (S->Val == NULL) {
-            fprintf(stderr, "FATAL: Unknown name: '%s'\n", S->Exp->atom.string.data);
-            exit(1);
+            /* try the top level */
+            S->Val = env_lookup(S, S->Toplevel_Env, S->Exp);
+            if (S->Val == NULL) {
+              fprintf(stderr, "FATAL: Unknown name: '%s'\n", S->Exp->atom.string.data);
+              exit(1);
+            }
           }
           NEXT(OP_POPJ_RET);
         }
@@ -695,16 +769,20 @@ eval(sn_t *S, obj_t *a, obj_t *env)
           dr = cdr(S, S->Exp);
           if (dr->flag == CONS_T) {
             S->Exp = car(S, dr);
+#if TRACE_DEBUG
             fprintf(stderr, "Going to evaluate: ");
             print_object(S, stderr, S->Exp);
             fputc('\n', stderr);
+#endif
             
             S->Clink = cons(S, S->Env, S->Clink);
             S->Clink = cons(S, cdr(S, dr), S->Clink);
 
+#if TRACE_DEBUG
             fprintf(stderr, "Clinking: ");
             print_object(S, stderr, cdr(S, dr));
             fputc('\n', stderr);
+#endif
 
             if (S->Opstack_index < S->Opstack_alloc) {
               S->Opstack[S->Opstack_index++] = OP_IF_DECIDE;
@@ -772,7 +850,9 @@ eval(sn_t *S, obj_t *a, obj_t *env)
       exit(1);
 
     case OP_IF_DECIDE:
+#ifdef TRACE_DEBUG
       fprintf(stderr, "TRACE: OP_IF_DECIDE\n");
+#endif
       S->Exp = car(S, S->Clink);
       S->Clink = cdr(S, S->Clink);
 
@@ -788,12 +868,19 @@ eval(sn_t *S, obj_t *a, obj_t *env)
       NEXT(OP_DISPATCH);
 
     case OP_APPLY_NO_ARGS:
+
+#ifdef TRACE_DEBUG
       fprintf(stderr, "TRACE: OP_APPLY_NO_ARGS\n");
+#endif
+
       S->Args = S->NIL;
       NEXT(OP_APPLY);
 
     case OP_ARGS:
+
+#ifdef TRACE_DEBUG
       fprintf(stderr, "TRACE: OP_ARGS\n");
+#endif
       S->Exp = car(S, S->Clink);
       S->Clink = cdr(S, S->Clink);
 
@@ -807,7 +894,11 @@ eval(sn_t *S, obj_t *a, obj_t *env)
       NEXT(OP_ARGS_1);
 
     case OP_ARGS_1:
+
+#ifdef TRACE_DEBUG
       fprintf(stderr, "TRACE: OP_ARGS_1\n");
+#endif
+
       if (cdr(S, S->Exp) == S->NIL) {
         S->Clink = cons(S, S->Args, S->Clink);
 
@@ -836,7 +927,10 @@ eval(sn_t *S, obj_t *a, obj_t *env)
       NEXT(OP_DISPATCH);
 
     case OP_ARGS_2:
+
+#ifdef TRACE_DEBUG
       fprintf(stderr, "TRACE: OP_ARGS_2\n");
+#endif
       S->Args = car(S, S->Clink);
       S->Clink = cdr(S, S->Clink);
 
@@ -851,7 +945,10 @@ eval(sn_t *S, obj_t *a, obj_t *env)
       NEXT(OP_ARGS_1);
 
     case OP_LAST_ARG:
+
+#ifdef TRACE_DEBUG
       fprintf(stderr, "TRACE: OP_LAST_ARG\n");
+#endif
       S->Args = car(S, S->Clink);
       S->Clink = cdr(S, S->Clink);
 
@@ -863,17 +960,21 @@ eval(sn_t *S, obj_t *a, obj_t *env)
       NEXT(OP_APPLY);
 
     case OP_APPLY:
+#ifdef TRACE_DEBUG
       fprintf(stderr, "TRACE: OP_APPLY\n");
+#endif
       if (S->Val && S->Val->flag == PRIM_T) {
-        S->Val = S->Val->prim.func(S->Args);
+        S->Val = S->Val->prim.func(S, S->Args);
 
         NEXT(OP_POPJ_RET);
       }
       else if (S->Val && S->Val->flag == CLOS_T) {
+#ifdef TRACE_DEBUG
         fprintf(stderr, "TRACE: Apply Closure\n\t params(Val): ");
         print_object(S, stderr, S->Val);
         print_object(S, stderr, closure_params(S, S->Val));
         fputc('\n', stderr);
+#endif
 
         S->Env = env_extend(S, closure_env(S, S->Val), closure_params(S, S->Val), S->Args);
         S->Exp = closure_code(S, S->Val);
@@ -882,7 +983,9 @@ eval(sn_t *S, obj_t *a, obj_t *env)
       }
       /* TODO: Error: unable to apply this */
     case OP_POPJ_RET:
+#ifdef TRACE_DEBUG
       fprintf(stderr, "TRACE: OP_POPJ_RET\n");
+#endif
       if (S->Opstack_index > 0) {
         op = S->Opstack[--(S->Opstack_index)];
       }
@@ -892,7 +995,9 @@ eval(sn_t *S, obj_t *a, obj_t *env)
       }
       break;
     case OP_DONE:
+#ifdef TRACE_DEBUG
       fprintf(stderr, "TRACE: OP_DONE\n");
+#endif
     default:
       return S->Val;
     }
@@ -909,6 +1014,7 @@ main(int argc, char **argv)
   obj_t *rd, *res;
 
   S.NIL = cons(&S, NULL, NULL);
+  S.Toplevel_Env = S.NIL; /* this should more or less be the module */
   S.Env = S.NIL;
   S.Exp = S.NIL;
   S.Val = S.NIL;
@@ -924,6 +1030,8 @@ main(int argc, char **argv)
   S.FN = intern(&S, "fn", 2);
   S.IF = intern(&S, "if", 2);
   S.QUOTE = intern(&S, "quote", 5);
+
+  install_builtins(&S);
 
   while (!feof(stdin)) {
     fputs("lll> ", stdout);

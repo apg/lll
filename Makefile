@@ -6,5 +6,5 @@ all: lll
 %.o: %.c $(HEADERS)
 	$(CC) -c $< $(CFLAGS)
 
-lll: lll.o 
+lll: lll.o builtins.o
 	$(CC) -o $@ $(CFLAGS) $^
